@@ -90,15 +90,6 @@
     };
   }
 
-  // 选项：默认排除含 ALPHA 的条目
-const opts = { excludeAlpha: true };
-
-// 是否排除（支持界面切换）
-function shouldExcludeToken(token) {
-  if (!token) return false;
-  return (document.getElementById("bia-exclude-alpha")?.checked ?? opts.excludeAlpha)
-         && /(^|[^A-Z])ALPHA([^A-Z]|$)/i.test(token);
-}
 
   
   // UI：简化的控制面板
@@ -150,6 +141,7 @@ function shouldExcludeToken(token) {
     state.rawOrders = [...map.values()];
   }
   
+
   // 主流程：自动翻页抓取 + DOM 回退解析 + 统计
   async function runCollection() {
     if (state.collecting) return;
@@ -196,9 +188,9 @@ function shouldExcludeToken(token) {
     const idx = {
       time: ths.findIndex(t => /时间|time/i.test(t)),
       symbol: ths.findIndex(t => /代币|币种|symbol/i.test(t)),
-      side: ths.findIndex(t => /方向|side/i.test(t)),
-      filled: ths.findIndex(t => /已成交|executed/i.test(t)),
-      amount: ths.findIndex(t => /成交额|quote|金额|filled\s*quote/i.test(t)),
+      side: ths.findIndex(t => /方向|side|买入|卖出/i.test(t)),
+      filled: ths.findIndex(t => /已成交|executed|数量/i.test(t)),
+      amount: ths.findIndex(t => /成交额|quote|金额/i.test(t)),
       status: ths.findIndex(t => /状态|status/i.test(t))
     };
   
@@ -221,12 +213,18 @@ function shouldExcludeToken(token) {
       // 只纳入已成交
       if (!/(已成交|filled)/i.test(statusStr)) continue;
   
-      const side = /买入|buy/i.test(sideStr) ? "BUY" : /卖出|sell/i.test(sideStr) ? "SELL" : "";
+      // 处理方向列的文本或颜色样式
+      const side = /买入|buy|绿色/i.test(sideStr) || tr.querySelector('td[style*="color"] span')?.textContent?.includes('买入') ? "BUY" : 
+                   /卖出|sell|红色/i.test(sideStr) || tr.querySelector('td[style*="color"] span')?.textContent?.includes('卖出') ? "SELL" : "";
+      
+      console.log(`行数据: 时间=${timeStr}, 代币=${symbolStr}, 方向=${sideStr}->${side}, 已成交=${filledStr}, 成交额=${amountStr}`);
       if (!side) continue;
   
       const token = parseToken(symbolStr, filledStr);
       const filledQty = parseNumber(filledStr);
       const amountUSDT = parseNumber(amountStr); // 以 USDT 计价
+      
+      console.log(`解析结果: token=${token}, qty=${filledQty}, amount=${amountUSDT}`);
   
       // 构造与 API 类似的对象
       arr.push({
@@ -300,6 +298,9 @@ function shouldExcludeToken(token) {
     const dateMap = new Map(); // 日期 -> 交易数据
     
     for (const o of state.rawOrders) {
+      // 只使用DOM数据进行计算，忽略API数据以确保与页面显示一致
+      if (o._src !== "dom") continue;
+      
       const side = (o.side || "").toUpperCase();
       if (!(side === "BUY" || side === "SELL")) continue;
       
@@ -307,7 +308,6 @@ function shouldExcludeToken(token) {
       let symbol = (o.symbol || "").trim();
       if (symbol.includes("/")) symbol = symbol.split("/")[0];
       symbol = symbol || "UNKNOWN";
-      if (shouldExcludeToken(symbol)) continue; // 排除 ALPHA*
       
       const qty = Number(o.executedQty || o.origQty || 0) || 0;
       const quote = Number(o.cummulativeQuoteQty || o.quoteQty || 0) || 0;
@@ -343,19 +343,19 @@ function shouldExcludeToken(token) {
     return results;
   }
   
-  // 根据时间确定交易日期（按8:00划分）
+  // 根据时间确定交易日期（按自然日00:00-23:59统计）
   function getTradeDate(timeStr) {
     const time = new Date(timeStr);
     if (isNaN(time.getTime())) return null;
     
-    // 如果是8点之前，算作前一天
-    const hour = time.getHours();
-    if (hour < 8) {
-      const prevDay = new Date(time.getTime() - 24 * 60 * 60 * 1000);
-      return prevDay.toISOString().slice(0, 10);
-    } else {
-      return time.toISOString().slice(0, 10);
-    }
+    // 转换为UTC+0时间，然后取日期部分
+    // 输入的timeStr是UTC+8时间，需要减去8小时得到UTC+0
+    const utcTime = new Date(time.getTime() - 8 * 60 * 60 * 1000);
+    const utcDateStr = utcTime.toISOString().slice(0, 10);
+    
+    console.log(`时间转换: ${timeStr} (UTC+8) -> ${utcTime.toISOString()} (UTC+0) -> 交易日: ${utcDateStr}`);
+    
+    return utcDateStr;
   }
   
   // 计算单日结果
@@ -375,7 +375,7 @@ function shouldExcludeToken(token) {
       const avgBuy = v.buyQty > 0 ? v.buyQuote / v.buyQty : 0;
       const avgSell = v.sellQty > 0 ? v.sellQuote / v.sellQty : 0;
       const matched = Math.min(v.buyQty, v.sellQty);
-      const wear = Math.max(0, (avgBuy - avgSell) * matched);
+      const wear = v.buyQuote - v.sellQuote;
   
       out.push({
         "代币": v.token,
@@ -416,17 +416,20 @@ function shouldExcludeToken(token) {
     URL.revokeObjectURL(a.href);
   }
 
-  // 导出详细交易记录 CSV
-  function downloadDetailCSV(targetDate) {
-    // 过滤出指定日期的原始交易记录
+  // 导出详细交易记录 CSV (所有日期)
+  function downloadDetailCSV() {
+    // 收集所有日期的原始交易记录
     const detailRecords = [];
     
     for (const o of state.rawOrders) {
+      // 只导出DOM数据，确保与页面显示一致
+      if (o._src !== "dom") continue;
+      
       const t = o.updateTime || o.time || o.transactTime;
       if (!t) continue;
       
       const tradeDate = getTradeDate(t);
-      if (tradeDate !== targetDate) continue;
+      if (!tradeDate) continue;
       
       // 只包含已成交的订单
       const st = (o.status || "").toUpperCase();
@@ -439,7 +442,6 @@ function shouldExcludeToken(token) {
       let symbol = (o.symbol || "").trim();
       if (symbol.includes("/")) symbol = symbol.split("/")[0];
       symbol = symbol || "UNKNOWN";
-      if (shouldExcludeToken(symbol)) continue;
       
       // 解析时间格式
       const timeObj = new Date(t);
@@ -479,7 +481,7 @@ function shouldExcludeToken(token) {
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `alpha_详细交易记录_${targetDate}.csv`;
+    a.download = `alpha_详细交易记录_所有日期.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -636,14 +638,39 @@ function shouldExcludeToken(token) {
     const exportDetailBtn = document.createElement("button");
     exportDetailBtn.textContent = "导出详细记录";
     exportDetailBtn.style.cssText = "padding:6px 12px; border:1px solid #444; background:#0969da; color:#fff; border-radius:8px; cursor:pointer; font-size:12px;";
-    exportDetailBtn.onclick = () => downloadDetailCSV(state.currentViewDate);
+    exportDetailBtn.onclick = () => downloadDetailCSV();
     buttonContainer.appendChild(exportDetailBtn);
+    
+    // 重新抓取按钮
+    const refreshBtn = document.createElement("button");
+    refreshBtn.textContent = "重新抓取";
+    refreshBtn.style.cssText = "padding:6px 12px; border:1px solid #444; background:#f79000; color:#fff; border-radius:8px; cursor:pointer; font-size:12px;";
+    refreshBtn.onclick = async () => {
+      // 清空旧数据
+      state.rawOrders = [];
+      state.collectedPages.clear();
+      state.multiDayData.clear();
+      state.currentViewDate = null;
+      console.log('开始重新抓取数据...');
+      box.remove();
+      // 重新运行收集流程
+      await runCollection();
+    };
+    buttonContainer.appendChild(refreshBtn);
     
     // 关闭按钮
     const closeBtn = document.createElement("button");
     closeBtn.textContent = "关闭";
     closeBtn.style.cssText = "padding:6px 12px; border:1px solid #444; background:#21262d; color:#fff; border-radius:8px; cursor:pointer; font-size:12px;";
-    closeBtn.onclick = () => box.remove();
+    closeBtn.onclick = () => {
+      // 清空收集的数据
+      state.rawOrders = [];
+      state.collectedPages.clear();
+      state.multiDayData.clear();
+      state.currentViewDate = null;
+      console.log('已清空所有收集的数据');
+      box.remove();
+    };
     buttonContainer.appendChild(closeBtn);
     
     box.appendChild(buttonContainer);
