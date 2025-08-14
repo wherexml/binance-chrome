@@ -215,8 +215,8 @@ function shouldExcludeToken(token) {
       const amountStr = get(idx.amount);        // "1,195.73679 USDT"
       const symbolStr = get(idx.symbol);        // "KOGE" or "KOGE/USDT"
   
-      // 只纳入目标日期范围内的数据（8:00-次日8:00）
-      if (!isInDateRange(timeStr, state.targetDate)) continue;
+      // 移除时间过滤 - 收集所有数据，稍后按日期分组
+      // if (!isInDateRange(timeStr, state.targetDate)) continue;
   
       // 只纳入已成交
       if (!/(已成交|filled)/i.test(statusStr)) continue;
@@ -326,6 +326,7 @@ function shouldExcludeToken(token) {
       // 初始化日期数据
       if (!dateMap.has(tradeDate)) {
         dateMap.set(tradeDate, []);
+        console.log(`发现新交易日期: ${tradeDate}`);
       }
       
       dateMap.get(tradeDate).push({ symbol, side, qty, quote });
@@ -334,6 +335,7 @@ function shouldExcludeToken(token) {
     // 为每个日期计算聚合结果
     const results = new Map();
     for (const [date, rows] of dateMap) {
+      console.log(`${date}: ${rows.length}笔交易`);
       results.set(date, calculateDayResult(rows, date));
     }
     
