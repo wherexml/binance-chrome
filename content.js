@@ -403,7 +403,7 @@ function shouldExcludeToken(token) {
   
   function round(n, p = 8) { return Number((n || 0).toFixed(p)); }
   
-  // 导出 CSV
+  // 导出统计汇总 CSV
   function downloadCSV(rows) {
     const headers = ["代币","今日买入总额","今日卖出总额","磨损"];
     const data = [headers, ...rows.map(r => headers.map(h => r[h]))];
@@ -411,7 +411,75 @@ function shouldExcludeToken(token) {
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `alpha_统计_${state.targetDate}.csv`;
+    a.download = `alpha_统计汇总_${state.currentViewDate || state.targetDate}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  // 导出详细交易记录 CSV
+  function downloadDetailCSV(targetDate) {
+    // 过滤出指定日期的原始交易记录
+    const detailRecords = [];
+    
+    for (const o of state.rawOrders) {
+      const t = o.updateTime || o.time || o.transactTime;
+      if (!t) continue;
+      
+      const tradeDate = getTradeDate(t);
+      if (tradeDate !== targetDate) continue;
+      
+      // 只包含已成交的订单
+      const st = (o.status || "").toUpperCase();
+      if (st && !/FILLED/.test(st)) continue;
+      
+      const side = (o.side || "").toUpperCase();
+      if (!(side === "BUY" || side === "SELL")) continue;
+      
+      // 代币名规整
+      let symbol = (o.symbol || "").trim();
+      if (symbol.includes("/")) symbol = symbol.split("/")[0];
+      symbol = symbol || "UNKNOWN";
+      if (shouldExcludeToken(symbol)) continue;
+      
+      // 解析时间格式
+      const timeObj = new Date(t);
+      const formattedTime = timeObj.toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
+      
+      detailRecords.push({
+        时间: formattedTime,
+        代币: symbol,
+        方向: side === 'BUY' ? '买入' : '卖出',
+        平均价格: (parseFloat(o.cummulativeQuoteQty || 0) / parseFloat(o.executedQty || 1)).toFixed(8) + ' USDT',
+        价格: (parseFloat(o.cummulativeQuoteQty || 0) / parseFloat(o.executedQty || 1)).toFixed(8) + ' USDT',
+        已成交: parseFloat(o.executedQty || 0).toFixed(8) + ' ' + symbol,
+        数量: parseFloat(o.executedQty || 0).toFixed(8) + ' ' + symbol,
+        成交额: parseFloat(o.cummulativeQuoteQty || 0).toFixed(8) + ' USDT',
+        状态: '已成交'
+      });
+    }
+    
+    if (detailRecords.length === 0) {
+      alert('当前日期没有交易记录可导出');
+      return;
+    }
+    
+    // 按时间倒序排序
+    detailRecords.sort((a, b) => new Date(b.时间) - new Date(a.时间));
+    
+    const headers = ["时间", "代币", "方向", "平均价格", "价格", "已成交", "数量", "成交额", "状态"];
+    const data = [headers, ...detailRecords.map(r => headers.map(h => r[h]))];
+    const csv = data.map(r => r.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `alpha_详细交易记录_${targetDate}.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -555,14 +623,21 @@ function shouldExcludeToken(token) {
   
     // 按钮容器
     const buttonContainer = document.createElement("div");
-    buttonContainer.style.cssText = "margin-top:12px; display:flex; gap:8px;";
+    buttonContainer.style.cssText = "margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;";
     
-    // 导出CSV按钮
-    const exportBtn = document.createElement("button");
-    exportBtn.textContent = "导出CSV";
-    exportBtn.style.cssText = "padding:6px 12px; border:1px solid #444; background:#238636; color:#fff; border-radius:8px; cursor:pointer; font-size:12px;";
-    exportBtn.onclick = () => downloadCSV(tokens);
-    buttonContainer.appendChild(exportBtn);
+    // 导出统计汇总CSV按钮
+    const exportSummaryBtn = document.createElement("button");
+    exportSummaryBtn.textContent = "导出统计汇总";
+    exportSummaryBtn.style.cssText = "padding:6px 12px; border:1px solid #444; background:#238636; color:#fff; border-radius:8px; cursor:pointer; font-size:12px;";
+    exportSummaryBtn.onclick = () => downloadCSV(tokens);
+    buttonContainer.appendChild(exportSummaryBtn);
+    
+    // 导出详细记录CSV按钮
+    const exportDetailBtn = document.createElement("button");
+    exportDetailBtn.textContent = "导出详细记录";
+    exportDetailBtn.style.cssText = "padding:6px 12px; border:1px solid #444; background:#0969da; color:#fff; border-radius:8px; cursor:pointer; font-size:12px;";
+    exportDetailBtn.onclick = () => downloadDetailCSV(state.currentViewDate);
+    buttonContainer.appendChild(exportDetailBtn);
     
     // 关闭按钮
     const closeBtn = document.createElement("button");
