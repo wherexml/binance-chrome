@@ -210,8 +210,9 @@
       // 移除时间过滤 - 收集所有数据，稍后按日期分组
       // if (!isInDateRange(timeStr, state.targetDate)) continue;
   
-      // 只纳入已成交
-      if (!/(已成交|filled)/i.test(statusStr)) continue;
+      // 检查成交额不为0（不过滤已取消订单）
+      const amountUSDT = parseNumber(amountStr);
+      if (amountUSDT === 0) continue;
   
       // 处理方向列的文本或颜色样式
       const side = /买入|buy|绿色/i.test(sideStr) || tr.querySelector('td[style*="color"] span')?.textContent?.includes('买入') ? "BUY" : 
@@ -222,7 +223,7 @@
   
       const token = parseToken(symbolStr, filledStr);
       const filledQty = parseNumber(filledStr);
-      const amountUSDT = parseNumber(amountStr); // 以 USDT 计价
+      // amountUSDT已经在前面计算过了
       
       console.log(`解析结果: token=${token}, qty=${filledQty}, amount=${amountUSDT}`);
   
@@ -375,7 +376,7 @@
       const avgBuy = v.buyQty > 0 ? v.buyQuote / v.buyQty : 0;
       const avgSell = v.sellQty > 0 ? v.sellQuote / v.sellQty : 0;
       const matched = Math.min(v.buyQty, v.sellQty);
-      const wear = v.buyQuote - v.sellQuote;
+      const wear = v.buyQuote === 0 ? 0 : v.buyQuote - v.sellQuote;
   
       out.push({
         "代币": v.token,
@@ -403,15 +404,42 @@
   
   function round(n, p = 8) { return Number((n || 0).toFixed(p)); }
   
-  // 导出统计汇总 CSV
-  function downloadCSV(rows) {
-    const headers = ["代币","今日买入总额","今日卖出总额","磨损"];
-    const data = [headers, ...rows.map(r => headers.map(h => r[h]))];
+  // 导出统计汇总 CSV (所有日期)
+  function downloadCSV() {
+    const allSummaryData = [];
+    const headers = ["日期", "代币", "买入总额", "卖出总额", "磨损"];
+    
+    // 收集所有日期的汇总数据
+    for (const [date, result] of state.multiDayData) {
+      for (const tokenData of result.tokens) {
+        allSummaryData.push({
+          日期: date,
+          代币: tokenData["代币"],
+          买入总额: tokenData["今日买入总额"],
+          卖出总额: tokenData["今日卖出总额"],
+          磨损: tokenData["磨损"]
+        });
+      }
+    }
+    
+    if (allSummaryData.length === 0) {
+      alert('没有数据可导出');
+      return;
+    }
+    
+    // 按日期和代币排序
+    allSummaryData.sort((a, b) => {
+      const dateCompare = b.日期.localeCompare(a.日期); // 日期倒序
+      if (dateCompare !== 0) return dateCompare;
+      return a.代币.localeCompare(b.代币); // 代币正序
+    });
+    
+    const data = [headers, ...allSummaryData.map(r => headers.map(h => r[h]))];
     const csv = data.map(r => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `alpha_统计汇总_${state.currentViewDate || state.targetDate}.csv`;
+    a.download = `alpha_统计汇总_所有日期.csv`;
     a.click();
     URL.revokeObjectURL(a.href);
   }
@@ -490,6 +518,53 @@
     URL.revokeObjectURL(a.href);
   }
 
+  // 计算总览数据（汇总所有日期）
+  function calculateOverviewData(allDatesData) {
+    const overviewMap = new Map(); // 代币 -> 汇总数据
+    let totalVolume = 0;
+    
+    // 汇总所有日期的数据
+    for (const [date, dayResult] of allDatesData) {
+      totalVolume += dayResult.totalVolume;
+      
+      for (const tokenData of dayResult.tokens) {
+        const token = tokenData["代币"];
+        const existing = overviewMap.get(token) || {
+          token: token,
+          buyQuote: 0,
+          sellQuote: 0
+        };
+        
+        existing.buyQuote += tokenData["今日买入总额"];
+        existing.sellQuote += tokenData["今日卖出总额"];
+        overviewMap.set(token, existing);
+      }
+    }
+    
+    // 转换为显示格式
+    const tokens = [];
+    for (const [, v] of overviewMap) {
+      // 总览页面：盈利 = 卖出总额 - 买入总额 (正数为盈利，负数为亏损)
+      const profit = v.buyQuote === 0 ? 0 : v.sellQuote - v.buyQuote;
+      tokens.push({
+        "代币": v.token,
+        "今日买入总额": round(v.buyQuote, 8),
+        "今日卖出总额": round(v.sellQuote, 8),
+        "盈利": round(profit, 8)
+      });
+    }
+    
+    // 按盈利倒序排列
+    tokens.sort((a, b) => b["盈利"] - a["盈利"]);
+    
+    return {
+      date: 'overview',
+      tokens,
+      totalVolume,
+      alphaScore: calculateAlphaScore(totalVolume)
+    };
+  }
+
   // 渲染多日结果表格
   function renderMultiDayResults(allDatesData) {
     // 先清除旧表
@@ -502,8 +577,8 @@
       return;
     }
     
-    // 默认显示最新日期
-    state.currentViewDate = dates[0];
+    // 默认显示总览
+    state.currentViewDate = 'overview';
     
     renderMultiDayTable(allDatesData, dates);
   }
@@ -513,8 +588,14 @@
     // 先清除旧表
     document.querySelector("#bia-result")?.remove();
     
-    const result = allDatesData.get(state.currentViewDate);
-    if (!result) return;
+    // 如果是总览模式，计算汇总数据
+    let result;
+    if (state.currentViewDate === 'overview') {
+      result = calculateOverviewData(allDatesData);
+    } else {
+      result = allDatesData.get(state.currentViewDate);
+      if (!result) return;
+    }
   
     const box = document.createElement("div");
     box.id = "bia-result";
@@ -527,10 +608,17 @@
   
     const { tokens, totalVolume, alphaScore } = result;
     
-    // 计算当前日期的时间范围显示
-    const targetDate = new Date(state.currentViewDate + 'T08:00:00');
-    const nextDay = new Date(targetDate.getTime() + 24 * 60 * 60 * 1000);
-    const timeRangeStr = `${targetDate.toLocaleDateString()} 08:00 - ${nextDay.toLocaleDateString()} 08:00`;
+    // 计算时间范围显示
+    let timeRangeStr;
+    if (state.currentViewDate === 'overview') {
+      const firstDate = dates[dates.length - 1]; // 最早日期
+      const lastDate = dates[0]; // 最晚日期
+      timeRangeStr = `${firstDate} 到 ${lastDate} 总览`;
+    } else {
+      const targetDate = new Date(state.currentViewDate + 'T08:00:00');
+      const nextDay = new Date(targetDate.getTime() + 24 * 60 * 60 * 1000);
+      timeRangeStr = `${targetDate.toLocaleDateString()} 08:00 - ${nextDay.toLocaleDateString()} 08:00`;
+    }
     
     // Alpha积分信息
     const scoreInfo = alphaScore.score > 0 ? 
@@ -545,6 +633,22 @@
     const tabsContainer = document.createElement("div");
     tabsContainer.style.cssText = "display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap;";
     
+    // 添加总览标签
+    const overviewTab = document.createElement("button");
+    const isOverviewActive = state.currentViewDate === 'overview';
+    overviewTab.style.cssText = `
+      padding: 4px 8px; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-size: 11px;
+      background: ${isOverviewActive ? '#238636' : '#21262d'}; color: #fff;
+      ${isOverviewActive ? 'font-weight: 600;' : ''}
+    `;
+    overviewTab.innerHTML = `总览<br><span style="font-size:9px;">$${result.totalVolume.toFixed(0)}</span>`;
+    overviewTab.onclick = () => {
+      state.currentViewDate = 'overview';
+      renderMultiDayTable(allDatesData, dates);
+    };
+    tabsContainer.appendChild(overviewTab);
+    
+    // 添加各日期标签
     dates.forEach(date => {
       const tab = document.createElement("button");
       const dayResult = allDatesData.get(date);
@@ -573,10 +677,23 @@
     box.appendChild(tabsContainer);
   
     const title = document.createElement("div");
+    const displayTitle = state.currentViewDate === 'overview' ? '交易统计结果 - 总览' : `交易统计结果 - ${state.currentViewDate}`;
+    
+    // 计算总盈利或总磨损
+    let totalSummary;
+    if (state.currentViewDate === 'overview') {
+      const totalProfit = tokens.reduce((sum, r) => sum + r['盈利'], 0);
+      const profitColor = totalProfit >= 0 ? '#f85149' : '#3fb950';
+      totalSummary = `<span style="color:${profitColor}">总盈利: ${totalProfit.toFixed(4)} USDT</span>`;
+    } else {
+      const totalWear = tokens.reduce((sum, r) => sum + r['磨损'], 0);
+      totalSummary = `总磨损: ${totalWear.toFixed(4)} USDT`;
+    }
+    
     title.innerHTML = `
-      <div style="font-weight:600;margin-bottom:4px;">交易统计结果 - ${state.currentViewDate}</div>
+      <div style="font-weight:600;margin-bottom:4px;">${displayTitle}</div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">时间范围: ${timeRangeStr}</div>
-      <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">代币数量: ${tokens.length} | 总磨损: ${tokens.reduce((sum, r) => sum + r['磨损'], 0).toFixed(4)} USDT</div>
+      <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">代币数量: ${tokens.length} | ${totalSummary}</div>
       <div style="font-size:12px;color:#f79000;margin-bottom:4px;font-weight:600;">📊 总买入金额: $${totalVolume.toFixed(2)} USDT</div>
       <div style="font-size:12px;color:#3fb950;margin-bottom:4px;">🏆 ${scoreInfo}</div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">${nextTierInfo}</div>
@@ -586,7 +703,9 @@
   
     const table = document.createElement("table");
     table.style.cssText = "width:100%; border-collapse: collapse; font-size:12px;";
-    const headers = ["代币","买入总额","卖出总额","磨损"];
+    const headers = state.currentViewDate === 'overview' ? 
+      ["代币","买入总额","卖出总额","盈利"] : 
+      ["代币","买入总额","卖出总额","磨损"];
   
     const thead = document.createElement("thead");
     const trh = document.createElement("tr");
@@ -606,17 +725,35 @@
       
       headers.forEach(h => {
         const td = document.createElement("td");
-        const value = r[h === "买入总额" ? "今日买入总额" : h === "卖出总额" ? "今日卖出总额" : h];
+        let value;
+        
+        // 根据是否总览模式选择不同的字段
+        if (state.currentViewDate === 'overview') {
+          value = r[h === "买入总额" ? "今日买入总额" : h === "卖出总额" ? "今日卖出总额" : h === "盈利" ? "盈利" : h];
+        } else {
+          value = r[h === "买入总额" ? "今日买入总额" : h === "卖出总额" ? "今日卖出总额" : h === "磨损" ? "磨损" : h];
+        }
+        
         td.textContent = (h === "代币") ? value : String(value);
         td.style.cssText = "padding:6px 8px;";
         
-        // 磨损列添加颜色
-        if (h === "磨损") {
-          const wearValue = parseFloat(value);
-          if (wearValue > 0) {
-            td.style.color = "#f85149"; // 红色表示损失
-          } else if (wearValue < 0) {
-            td.style.color = "#3fb950"; // 绿色表示盈利
+        // 为盈利/磨损列添加颜色
+        if (h === "盈利" || h === "磨损") {
+          const numValue = parseFloat(value);
+          if (state.currentViewDate === 'overview') {
+            // 总览模式：盈利用红色正数，亏损用绿色负数
+            if (numValue > 0) {
+              td.style.color = "#f85149"; // 红色表示盈利
+            } else if (numValue < 0) {
+              td.style.color = "#3fb950"; // 绿色表示亏损
+            }
+          } else {
+            // 单日模式：磨损用红色
+            if (numValue > 0) {
+              td.style.color = "#f85149"; // 红色表示损失
+            } else if (numValue < 0) {
+              td.style.color = "#3fb950"; // 绿色表示盈利
+            }
           }
         }
         
@@ -635,7 +772,7 @@
     const exportSummaryBtn = document.createElement("button");
     exportSummaryBtn.textContent = "导出统计汇总";
     exportSummaryBtn.style.cssText = "padding:6px 12px; border:1px solid #444; background:#238636; color:#fff; border-radius:8px; cursor:pointer; font-size:12px;";
-    exportSummaryBtn.onclick = () => downloadCSV(tokens);
+    exportSummaryBtn.onclick = () => downloadCSV();
     buttonContainer.appendChild(exportSummaryBtn);
     
     // 导出详细记录CSV按钮
