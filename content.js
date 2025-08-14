@@ -454,15 +454,19 @@
         second: '2-digit'
       });
       
+      const quoteAmount = parseFloat(o.cummulativeQuoteQty || 0);
+      const avgPrice = parseFloat(o.cummulativeQuoteQty || 0) / parseFloat(o.executedQty || 1);
+      const qty = parseFloat(o.executedQty || 0);
+      
       detailRecords.push({
         时间: formattedTime,
         代币: symbol,
         方向: side === 'BUY' ? '买入' : '卖出',
-        平均价格: (parseFloat(o.cummulativeQuoteQty || 0) / parseFloat(o.executedQty || 1)).toFixed(8) + ' USDT',
-        价格: (parseFloat(o.cummulativeQuoteQty || 0) / parseFloat(o.executedQty || 1)).toFixed(8) + ' USDT',
-        已成交: parseFloat(o.executedQty || 0).toFixed(8) + ' ' + symbol,
-        数量: parseFloat(o.executedQty || 0).toFixed(8) + ' ' + symbol,
-        成交额: parseFloat(o.cummulativeQuoteQty || 0).toFixed(8) + ' USDT',
+        平均价格: avgPrice.toFixed(8),
+        价格: avgPrice.toFixed(8),
+        已成交: qty.toFixed(8) + ' ' + symbol,
+        数量: qty.toFixed(8) + ' ' + symbol,
+        成交额: side === 'BUY' ? (-quoteAmount).toFixed(8) : quoteAmount.toFixed(8), // 买入为负数（资金流出）
         状态: '已成交'
       });
     }
