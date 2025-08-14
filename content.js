@@ -10,7 +10,9 @@
     rawOrders: [],        // 原始记录（来自接口或DOM）
     collectedPages: new Set(),
     targetDate: new Date().toISOString().slice(0, 10), // yyyy-mm-dd（本地时区解析时仅看日期部分）
-    collecting: false
+    collecting: false,
+    multiDayData: new Map(), // 存储多日数据：日期 -> 交易数据
+    currentViewDate: null    // 当前查看的日期
   };
 
   // 检查时间是否在指定日期的范围内（当日8:00到次日8:00）
@@ -172,14 +174,12 @@ function shouldExcludeToken(token) {
       await waitForTableChange(1500);
     }
   
-    // 聚合并展示
-    const result = aggregateByToken();
-    console.table(result.tokens);
-    console.log('总买入金额:', result.totalVolume.toFixed(2), 'USDT');
-    console.log('Alpha积分:', result.alphaScore);
+    // 聚合所有日期的数据
+    const allDatesData = aggregateAllDates();
+    console.log('多日数据统计完成，共', allDatesData.size, '天');
     
-    // 显示结果表格
-    renderResultTable(result);
+    // 显示结果表格（支持多日切换）
+    renderMultiDayResults(allDatesData);
     
     state.collecting = false;
   }
@@ -295,33 +295,69 @@ function shouldExcludeToken(token) {
   }
   
 
-  function aggregateByToken() {
-    // 规整为通用行
-    const rows = [];
+  // 按日期聚合所有数据
+  function aggregateAllDates() {
+    const dateMap = new Map(); // 日期 -> 交易数据
+    
     for (const o of state.rawOrders) {
       const side = (o.side || "").toUpperCase();
       if (!(side === "BUY" || side === "SELL")) continue;
-  
-      // 时间过滤 - 使用时间范围检查
-      const t = o.updateTime || o.time || o.transactTime;
-      if (t && !isInDateRange(t, state.targetDate)) continue;
-  
+      
       // 代币名规整：去掉 /USDT 之类的报价货币
       let symbol = (o.symbol || "").trim();
       if (symbol.includes("/")) symbol = symbol.split("/")[0];
       symbol = symbol || "UNKNOWN";
       if (shouldExcludeToken(symbol)) continue; // 排除 ALPHA*
-  
+      
       const qty = Number(o.executedQty || o.origQty || 0) || 0;
       const quote = Number(o.cummulativeQuoteQty || o.quoteQty || 0) || 0;
-  
+      
       // 只纳入已成交
       const st = (o.status || "").toUpperCase();
       if (st && !/FILLED/.test(st)) continue;
-  
-      rows.push({ symbol, side, qty, quote });
+      
+      // 确定交易属于哪个日期（按8:00划分）
+      const t = o.updateTime || o.time || o.transactTime;
+      if (!t) continue;
+      
+      const tradeDate = getTradeDate(t);
+      if (!tradeDate) continue;
+      
+      // 初始化日期数据
+      if (!dateMap.has(tradeDate)) {
+        dateMap.set(tradeDate, []);
+      }
+      
+      dateMap.get(tradeDate).push({ symbol, side, qty, quote });
     }
+    
+    // 为每个日期计算聚合结果
+    const results = new Map();
+    for (const [date, rows] of dateMap) {
+      results.set(date, calculateDayResult(rows, date));
+    }
+    
+    state.multiDayData = results;
+    return results;
+  }
   
+  // 根据时间确定交易日期（按8:00划分）
+  function getTradeDate(timeStr) {
+    const time = new Date(timeStr);
+    if (isNaN(time.getTime())) return null;
+    
+    // 如果是8点之前，算作前一天
+    const hour = time.getHours();
+    if (hour < 8) {
+      const prevDay = new Date(time.getTime() - 24 * 60 * 60 * 1000);
+      return prevDay.toISOString().slice(0, 10);
+    } else {
+      return time.toISOString().slice(0, 10);
+    }
+  }
+  
+  // 计算单日结果
+  function calculateDayResult(rows, date) {
     // 按代币聚合
     const map = new Map();
     for (const r of rows) {
@@ -354,6 +390,7 @@ function shouldExcludeToken(token) {
     const totalVolume = [...map.values()].reduce((sum, v) => sum + v.buyQuote, 0);
     
     return {
+      date,
       tokens: out,
       totalVolume: totalVolume,
       alphaScore: calculateAlphaScore(totalVolume)
@@ -377,23 +414,45 @@ function shouldExcludeToken(token) {
     URL.revokeObjectURL(a.href);
   }
 
-  function renderResultTable(result) {
+  // 渲染多日结果表格
+  function renderMultiDayResults(allDatesData) {
     // 先清除旧表
     document.querySelector("#bia-result")?.remove();
+    
+    // 获取日期列表，按日期倒序排列
+    const dates = Array.from(allDatesData.keys()).sort((a, b) => b.localeCompare(a));
+    if (dates.length === 0) {
+      alert('未找到任何交易数据');
+      return;
+    }
+    
+    // 默认显示最新日期
+    state.currentViewDate = dates[0];
+    
+    renderMultiDayTable(allDatesData, dates);
+  }
+  
+  // 渲染多日表格界面
+  function renderMultiDayTable(allDatesData, dates) {
+    // 先清除旧表
+    document.querySelector("#bia-result")?.remove();
+    
+    const result = allDatesData.get(state.currentViewDate);
+    if (!result) return;
   
     const box = document.createElement("div");
     box.id = "bia-result";
     box.style.cssText = `
       position: fixed; right: 16px; bottom: 72px; z-index: 999999;
-      max-height: 75vh; overflow: auto; background: #0d1117; color: #c9d1d9;
+      max-height: 80vh; overflow: auto; background: #0d1117; color: #c9d1d9;
       border: 1px solid #30363d; border-radius: 12px; padding: 12px;
-      min-width: 650px; box-shadow: 0 8px 24px rgba(0,0,0,.4);
+      min-width: 700px; box-shadow: 0 8px 24px rgba(0,0,0,.4);
     `;
   
     const { tokens, totalVolume, alphaScore } = result;
     
-    // 计算时间范围显示
-    const targetDate = new Date(state.targetDate + 'T08:00:00');
+    // 计算当前日期的时间范围显示
+    const targetDate = new Date(state.currentViewDate + 'T08:00:00');
     const nextDay = new Date(targetDate.getTime() + 24 * 60 * 60 * 1000);
     const timeRangeStr = `${targetDate.toLocaleDateString()} 08:00 - ${nextDay.toLocaleDateString()} 08:00`;
     
@@ -405,10 +464,41 @@ function shouldExcludeToken(token) {
     const nextTierInfo = alphaScore.nextTier ? 
       `下一档位: $${alphaScore.nextTier.volume.toLocaleString()} (${alphaScore.nextTier.score}分) | 差距: $${alphaScore.gap.toFixed(2)}` :
       '已达最高档位';
+
+    // 创建日期标签页
+    const tabsContainer = document.createElement("div");
+    tabsContainer.style.cssText = "display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap;";
+    
+    dates.forEach(date => {
+      const tab = document.createElement("button");
+      const dayResult = allDatesData.get(date);
+      const isActive = date === state.currentViewDate;
+      
+      tab.style.cssText = `
+        padding: 4px 8px; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-size: 11px;
+        background: ${isActive ? '#238636' : '#21262d'}; color: #fff;
+        ${isActive ? 'font-weight: 600;' : ''}
+      `;
+      
+      const dateObj = new Date(date);
+      const displayDate = `${dateObj.getMonth() + 1}/${dateObj.getDate()}`;
+      const dayVolume = dayResult.totalVolume.toFixed(0);
+      
+      tab.innerHTML = `${displayDate}<br><span style="font-size:9px;">$${dayVolume}</span>`;
+      
+      tab.onclick = () => {
+        state.currentViewDate = date;
+        renderMultiDayTable(allDatesData, dates);
+      };
+      
+      tabsContainer.appendChild(tab);
+    });
+    
+    box.appendChild(tabsContainer);
   
     const title = document.createElement("div");
     title.innerHTML = `
-      <div style="font-weight:600;margin-bottom:4px;">交易统计结果</div>
+      <div style="font-weight:600;margin-bottom:4px;">交易统计结果 - ${state.currentViewDate}</div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">时间范围: ${timeRangeStr}</div>
       <div style="font-size:11px;color:#8b949e;margin-bottom:4px;">代币数量: ${tokens.length} | 总磨损: ${tokens.reduce((sum, r) => sum + r['磨损'], 0).toFixed(4)} USDT</div>
       <div style="font-size:12px;color:#f79000;margin-bottom:4px;font-weight:600;">📊 总买入金额: $${totalVolume.toFixed(2)} USDT</div>
@@ -482,4 +572,9 @@ function shouldExcludeToken(token) {
     box.appendChild(buttonContainer);
   
     document.body.appendChild(box);
+  }
+
+  // 向后兼容的单日结果展示函数
+  function renderResultTable(result) {
+    renderMultiDayResults(new Map([[result.date || state.targetDate, result]]));
   }
