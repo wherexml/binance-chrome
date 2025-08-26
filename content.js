@@ -92,6 +92,54 @@
 
 
   
+  // 设置日期选择器为今天
+  function setDatePickerToToday() {
+    const today = new Date().toISOString().slice(0, 10);
+    
+    // 查找币安的日期选择器输入框
+    const dateInputs = document.querySelectorAll('.bn-web-datepicker-input input[date-range]');
+    
+    dateInputs.forEach(input => {
+      if (input.value !== today) {
+        // 设置值
+        input.value = today;
+        
+        // 触发输入事件以确保币安的UI更新
+        const inputEvent = new Event('input', { bubbles: true });
+        input.dispatchEvent(inputEvent);
+        
+        // 触发change事件
+        const changeEvent = new Event('change', { bubbles: true });
+        input.dispatchEvent(changeEvent);
+        
+        console.log(`已设置日期选择器为今天: ${today}`);
+      }
+    });
+  }
+
+  // 页面加载完成后设置日期
+  function initDatePicker() {
+    // 延迟执行，等待页面完全加载
+    setTimeout(() => {
+      setDatePickerToToday();
+    }, 1000);
+    
+    // 监听页面变化，如果日期选择器出现了，自动设置为今天
+    const observer = new MutationObserver(() => {
+      setDatePickerToToday();
+    });
+    
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true
+    });
+    
+    // 10秒后停止监听，避免过度消耗资源
+    setTimeout(() => {
+      observer.disconnect();
+    }, 10000);
+  }
+
   // UI：简化的控制面板
   (function mountUI() {
     const panel = document.createElement('div');
@@ -107,6 +155,9 @@
     document.body.appendChild(panel);
   
     document.getElementById('bia-collect').onclick = runCollection;
+    
+    // 初始化日期选择器
+    initDatePicker();
   })();
   
   // 监听 pageHook 发来的 API 数据
@@ -376,7 +427,9 @@
       const avgBuy = v.buyQty > 0 ? v.buyQuote / v.buyQty : 0;
       const avgSell = v.sellQty > 0 ? v.sellQuote / v.sellQty : 0;
       const matched = Math.min(v.buyQty, v.sellQty);
-      const wear = v.buyQuote === 0 ? 0 : v.buyQuote - v.sellQuote;
+      // 磨损 = 买入总额 - 卖出总额 + 买入手续费(0.01%)
+      const buyFee = v.buyQuote * 0.0001; // 0.01% = 0.0001
+      const wear = v.buyQuote === 0 ? 0 : v.buyQuote - v.sellQuote + buyFee;
   
       out.push({
         "代币": v.token,
@@ -633,22 +686,7 @@
     const tabsContainer = document.createElement("div");
     tabsContainer.style.cssText = "display: flex; gap: 4px; margin-bottom: 12px; flex-wrap: wrap;";
     
-    // 添加总览标签
-    const overviewTab = document.createElement("button");
-    const isOverviewActive = state.currentViewDate === 'overview';
-    overviewTab.style.cssText = `
-      padding: 4px 8px; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-size: 11px;
-      background: ${isOverviewActive ? '#238636' : '#21262d'}; color: #fff;
-      ${isOverviewActive ? 'font-weight: 600;' : ''}
-    `;
-    overviewTab.innerHTML = `总览<br><span style="font-size:9px;">$${result.totalVolume.toFixed(0)}</span>`;
-    overviewTab.onclick = () => {
-      state.currentViewDate = 'overview';
-      renderMultiDayTable(allDatesData, dates);
-    };
-    tabsContainer.appendChild(overviewTab);
-    
-    // 添加各日期标签
+    // 先添加各日期标签
     dates.forEach(date => {
       const tab = document.createElement("button");
       const dayResult = allDatesData.get(date);
@@ -673,6 +711,21 @@
       
       tabsContainer.appendChild(tab);
     });
+    
+    // 最后添加总览标签
+    const overviewTab = document.createElement("button");
+    const isOverviewActive = state.currentViewDate === 'overview';
+    overviewTab.style.cssText = `
+      padding: 4px 8px; border: 1px solid #444; border-radius: 6px; cursor: pointer; font-size: 11px;
+      background: ${isOverviewActive ? '#238636' : '#21262d'}; color: #fff;
+      ${isOverviewActive ? 'font-weight: 600;' : ''}
+    `;
+    overviewTab.innerHTML = `总览<br><span style="font-size:9px;">$${result.totalVolume.toFixed(0)}</span>`;
+    overviewTab.onclick = () => {
+      state.currentViewDate = 'overview';
+      renderMultiDayTable(allDatesData, dates);
+    };
+    tabsContainer.appendChild(overviewTab);
     
     box.appendChild(tabsContainer);
   
