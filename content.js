@@ -98,6 +98,7 @@
     
     // 查找币安的日期选择器输入框
     const dateInputs = document.querySelectorAll('.bn-web-datepicker-input input[date-range]');
+    let dateChanged = false;
     
     dateInputs.forEach(input => {
       if (input.value !== today) {
@@ -112,9 +113,69 @@
         const changeEvent = new Event('change', { bubbles: true });
         input.dispatchEvent(changeEvent);
         
+        dateChanged = true;
         console.log(`已设置日期选择器为今天: ${today}`);
       }
     });
+    
+    // 如果日期有变化，自动点击搜索按钮
+    if (dateChanged) {
+      setTimeout(() => {
+        clickSearchButton();
+      }, 500); // 延迟500ms确保日期设置完成
+    }
+  }
+
+  // 点击搜索按钮
+  function clickSearchButton() {
+    // 查找搜索按钮的多种可能选择器
+    const searchSelectors = [
+      'button[data-bn-type="button"] .css-j2trfz',
+      'button[data-bn-type="button"]:contains("搜索")',
+      'button.css-j2trfz',
+      'button:contains("搜索")',
+      'button[data-bn-type="button"]'
+    ];
+    
+    let searchButton = null;
+    
+    // 尝试不同的选择器
+    for (const selector of searchSelectors) {
+      // 对于包含文本的选择器，需要手动查找
+      if (selector.includes(':contains')) {
+        const buttons = document.querySelectorAll('button[data-bn-type="button"]');
+        for (const btn of buttons) {
+          if (btn.textContent.includes('搜索') || btn.textContent.includes('Search')) {
+            searchButton = btn;
+            break;
+          }
+        }
+      } else {
+        searchButton = document.querySelector(selector);
+      }
+      
+      if (searchButton) break;
+    }
+    
+    // 额外尝试通过class查找
+    if (!searchButton) {
+      const buttons = document.querySelectorAll('button');
+      for (const btn of buttons) {
+        if (btn.className.includes('css-j2trfz') || 
+            btn.textContent.trim() === '搜索' || 
+            btn.textContent.trim() === 'Search') {
+          searchButton = btn;
+          break;
+        }
+      }
+    }
+    
+    if (searchButton && !searchButton.disabled) {
+      searchButton.click();
+      console.log('已自动点击搜索按钮');
+    } else {
+      console.log('未找到搜索按钮或按钮被禁用');
+    }
   }
 
   // 页面加载完成后设置日期
@@ -182,9 +243,16 @@
     return Array.isArray(candidates) ? candidates : [];
   }
   
-  // 合并记录（去重按 orderId + updateTime）
+  // 合并记录（去重按 orderId + updateTime + 代币 + 方向 + 金额）
   function mergeOrders(arr, src = "api") {
-    const key = (o) => `${o.orderId || o.id || ""}_${o.updateTime || o.time || o.transactTime || ""}`;
+    const key = (o) => {
+      const orderId = o.orderId || o.id || "";
+      const time = o.updateTime || o.time || o.transactTime || "";
+      const symbol = o.symbol || "";
+      const side = o.side || "";
+      const amount = o.cummulativeQuoteQty || o.quoteQty || 0;
+      return `${orderId}_${time}_${symbol}_${side}_${amount}`;
+    };
     const map = new Map(state.rawOrders.map(o => [key(o), o]));
     for (const o of arr) {
       map.set(key(o), { ...o, _src: src });
@@ -246,7 +314,8 @@
     };
   
     const arr = [];
-    for (const tr of trows) {
+    for (let trIndex = 0; trIndex < trows.length; trIndex++) {
+      const tr = trows[trIndex];
       const tds = [...tr.querySelectorAll("td")];
       if (!tds.length || tds.length < ths.length) continue; // 跳过展开行
       const get = (i) => (i >= 0 ? tds[i].innerText.trim() : "");
@@ -278,15 +347,19 @@
       
       console.log(`解析结果: token=${token}, qty=${filledQty}, amount=${amountUSDT}`);
   
-      // 构造与 API 类似的对象
+      // 构造与 API 类似的对象，使用时间戳和行索引确保唯一性
+      const currentTime = Date.now();
+      const uniqueId = `dom-${currentTime}-${trIndex}-${arr.length}`;
       arr.push({
-        orderId: `${datePart}-${token}-${side}-${amountUSDT}-${filledQty}`,
+        orderId: uniqueId,
         updateTime: timeStr,
         symbol: token,
         side,
         status: "FILLED",
         executedQty: filledQty,
-        cummulativeQuoteQty: amountUSDT
+        cummulativeQuoteQty: amountUSDT,
+        _uniqueId: uniqueId, // 添加唯一标识用于调试
+        _originalData: { datePart, token, side, amountUSDT, filledQty } // 保留原始数据用于调试
       });
     }
     mergeOrders(arr, "dom");
@@ -597,8 +670,9 @@
     // 转换为显示格式
     const tokens = [];
     for (const [, v] of overviewMap) {
-      // 总览页面：盈利 = 卖出总额 - 买入总额 (正数为盈利，负数为亏损)
-      const profit = v.buyQuote === 0 ? 0 : v.sellQuote - v.buyQuote;
+      // 总览页面：盈利 = 卖出总额 - 买入总额 - 买入手续费(0.01%)
+      const buyFee = v.buyQuote * 0.0001; // 0.01% = 0.0001
+      const profit = v.buyQuote === 0 ? 0 : v.sellQuote - v.buyQuote - buyFee;
       tokens.push({
         "代币": v.token,
         "今日买入总额": round(v.buyQuote, 8),
