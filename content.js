@@ -186,10 +186,24 @@
   function mergeOrders(arr, src = "api") {
     const key = (o) => `${o.orderId || o.id || ""}_${o.updateTime || o.time || o.transactTime || ""}`;
     const map = new Map(state.rawOrders.map(o => [key(o), o]));
+    console.log(`合并前：已有${state.rawOrders.length}条记录，新增${arr.length}条记录`);
+    
+    let addedCount = 0;
+    let duplicateCount = 0;
+    
     for (const o of arr) {
-      map.set(key(o), { ...o, _src: src });
+      const orderKey = key(o);
+      if (map.has(orderKey)) {
+        console.log(`发现重复记录: ${o.symbol} ${o.side} ${o.updateTime}`);
+        duplicateCount++;
+      } else {
+        addedCount++;
+      }
+      map.set(orderKey, { ...o, _src: src });
     }
+    
     state.rawOrders = [...map.values()];
+    console.log(`合并后：总计${state.rawOrders.length}条记录，新增${addedCount}条，重复${duplicateCount}条`);
   }
   
 
@@ -246,9 +260,14 @@
     };
   
     const arr = [];
-    for (const tr of trows) {
+    console.log(`开始解析表格，共${trows.length}行，表头${ths.length}列`);
+    for (let i = 0; i < trows.length; i++) {
+      const tr = trows[i];
       const tds = [...tr.querySelectorAll("td")];
-      if (!tds.length || tds.length < ths.length) continue; // 跳过展开行
+      if (!tds.length || tds.length < ths.length) {
+        console.log(`第${i+1}行：跳过展开行或无效行，td数量=${tds.length}`);
+        continue; // 跳过展开行
+      }
       const get = (i) => (i >= 0 ? tds[i].innerText.trim() : "");
       const timeStr = get(idx.time);            // 2025-08-14 21:40:37
       const datePart = (timeStr || "").slice(0, 10);
@@ -263,7 +282,10 @@
   
       // 检查成交额不为0（不过滤已取消订单）
       const amountUSDT = parseNumber(amountStr);
-      if (amountUSDT === 0) continue;
+      if (amountUSDT === 0) {
+        console.log(`跳过0成交额订单: 时间=${timeStr}, 代币=${symbolStr}, 成交额=${amountStr}`);
+        continue;
+      }
   
       // 处理方向列的文本或颜色样式
       const side = /买入|buy|绿色/i.test(sideStr) || tr.querySelector('td[style*="color"] span')?.textContent?.includes('买入') ? "BUY" : 
@@ -278,9 +300,9 @@
       
       console.log(`解析结果: token=${token}, qty=${filledQty}, amount=${amountUSDT}`);
   
-      // 构造与 API 类似的对象
+      // 构造与 API 类似的对象，使用行索引确保唯一性
       arr.push({
-        orderId: `${datePart}-${token}-${side}-${amountUSDT}-${filledQty}`,
+        orderId: `DOM-${i+1}-${datePart}-${token}-${side}-${amountUSDT}-${filledQty}-${timeStr}`,
         updateTime: timeStr,
         symbol: token,
         side,
@@ -306,7 +328,13 @@
   
   function parseNumber(s) {
     if (!s) return 0;
-    const n = parseFloat(String(s).replace(/[^\d.\-]/g, ""));
+    // 保留负号、数字、小数点，但要正确处理负号位置
+    const cleaned = String(s).replace(/[^\d.\-]/g, "");
+    // 确保负号只在开头
+    const hasNegative = s.includes('-');
+    const numbersOnly = cleaned.replace(/-/g, "");
+    const finalStr = hasNegative ? '-' + numbersOnly : numbersOnly;
+    const n = parseFloat(finalStr);
     return isFinite(n) ? n : 0;
   }
   
@@ -349,6 +377,8 @@
   function aggregateAllDates() {
     const dateMap = new Map(); // 日期 -> 交易数据
     
+    console.log(`开始聚合数据，总共有 ${state.rawOrders.length} 条原始记录`);
+    
     for (const o of state.rawOrders) {
       // 只使用DOM数据进行计算，忽略API数据以确保与页面显示一致
       if (o._src !== "dom") continue;
@@ -368,12 +398,18 @@
       const st = (o.status || "").toUpperCase();
       if (st && !/FILLED/.test(st)) continue;
       
-      // 确定交易属于哪个日期（按8:00划分）
+      // 确定交易属于哪个日期（按UTC+0自然日划分）
       const t = o.updateTime || o.time || o.transactTime;
-      if (!t) continue;
+      if (!t) {
+        console.log(`跳过无时间记录:`, o);
+        continue;
+      }
       
       const tradeDate = getTradeDate(t);
-      if (!tradeDate) continue;
+      if (!tradeDate) {
+        console.log(`无法解析时间: ${t}`, o);
+        continue;
+      }
       
       // 初始化日期数据
       if (!dateMap.has(tradeDate)) {
@@ -381,6 +417,7 @@
         console.log(`发现新交易日期: ${tradeDate}`);
       }
       
+      console.log(`交易记录: 时间=${t}, 解析日期=${tradeDate}, 代币=${symbol}, 方向=${side}, 金额=${quote}`);
       dateMap.get(tradeDate).push({ symbol, side, qty, quote });
     }
     
@@ -397,17 +434,39 @@
   
   // 根据时间确定交易日期（按自然日00:00-23:59统计）
   function getTradeDate(timeStr) {
+    if (!timeStr) return null;
+    
+    // 解析时间字符串，格式通常为 "2025-09-14 21:00:00"
+    // 币安页面显示的是本地时间（UTC+8），我们直接按本地日期统计
+    const timeMatch = timeStr.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
+    if (timeMatch) {
+      const [, year, month, day] = timeMatch;
+      const dateStr = `${year}-${month}-${day}`;
+      
+      console.log(`时间转换: ${timeStr} -> 交易日期: ${dateStr}`);
+      return dateStr;
+    }
+    
+    // 回退逻辑：从时间字符串中提取日期部分
+    if (timeStr.includes(' ')) {
+      const datePart = timeStr.split(' ')[0];
+      if (datePart.match(/\d{4}-\d{2}-\d{2}/)) {
+        console.log(`时间转换(回退): ${timeStr} -> 交易日期: ${datePart}`);
+        return datePart;
+      }
+    }
+    
+    // 最后的回退：使用Date对象但按本地时区处理
     const time = new Date(timeStr);
     if (isNaN(time.getTime())) return null;
     
-    // 转换为UTC+0时间，然后取日期部分
-    // 输入的timeStr是UTC+8时间，需要减去8小时得到UTC+0
-    const utcTime = new Date(time.getTime() - 8 * 60 * 60 * 1000);
-    const utcDateStr = utcTime.toISOString().slice(0, 10);
+    // 获取本地日期（不转换时区）
+    const localDateStr = time.getFullYear() + '-' + 
+                         String(time.getMonth() + 1).padStart(2, '0') + '-' + 
+                         String(time.getDate()).padStart(2, '0');
+    console.log(`时间转换(最终回退): ${timeStr} -> 本地日期: ${localDateStr}`);
     
-    console.log(`时间转换: ${timeStr} (UTC+8) -> ${utcTime.toISOString()} (UTC+0) -> 交易日: ${utcDateStr}`);
-    
-    return utcDateStr;
+    return localDateStr;
   }
   
   // 计算单日结果
@@ -421,15 +480,34 @@
       map.set(r.symbol, it);
     }
   
-    // 计算磨损：同日撮合量 × (买均价 - 卖均价), 低于0按0计
+    // 计算磨损：对于同一代币的买卖，计算实际磨损成本
     const out = [];
     for (const [, v] of map) {
       const avgBuy = v.buyQty > 0 ? v.buyQuote / v.buyQty : 0;
       const avgSell = v.sellQty > 0 ? v.sellQuote / v.sellQty : 0;
       const matched = Math.min(v.buyQty, v.sellQty);
-      // 磨损 = 买入总额 - 卖出总额 + 买入手续费(0.01%)
-      const buyFee = v.buyQuote * 0.0001; // 0.01% = 0.0001
-      const wear = v.buyQuote === 0 ? 0 : v.buyQuote - v.sellQuote + buyFee;
+      
+      // 磨损计算方法：
+      // 方法1：简单差值法（当前使用）- 买入总额 - 卖出总额 + 手续费
+      // 方法2：撮合量计算法 - 撮合量 × (买均价 - 卖均价) + 手续费
+      
+      let wear;
+      if (matched > 0 && avgBuy > 0 && avgSell > 0) {
+        // 有撮合量的情况下，使用撮合量计算法
+        const priceDiff = avgBuy - avgSell;
+        const tradingWear = matched * priceDiff;
+        const buyFee = v.buyQuote * 0.0001; // 买入手续费 0.01%
+        const sellFee = v.sellQuote * 0.0001; // 卖出手续费 0.01%
+        wear = tradingWear + buyFee + sellFee;
+        
+        console.log(`${v.token} 磨损详情: 撮合量=${matched.toFixed(4)}, 买均价=${avgBuy.toFixed(6)}, 卖均价=${avgSell.toFixed(6)}, 价差磨损=${tradingWear.toFixed(4)}, 手续费=${(buyFee + sellFee).toFixed(4)}, 总磨损=${wear.toFixed(4)}`);
+      } else {
+        // 只有买入或只有卖出的情况
+        const buyFee = v.buyQuote * 0.0001;
+        wear = v.buyQuote === 0 ? 0 : v.buyQuote - v.sellQuote + buyFee;
+        
+        console.log(`${v.token} 磨损详情(单边): 买入=${v.buyQuote.toFixed(4)}, 卖出=${v.sellQuote.toFixed(4)}, 手续费=${buyFee.toFixed(4)}, 总磨损=${wear.toFixed(4)}`);
+      }
   
       out.push({
         "代币": v.token,
@@ -585,11 +663,13 @@
         const existing = overviewMap.get(token) || {
           token: token,
           buyQuote: 0,
-          sellQuote: 0
+          sellQuote: 0,
+          totalWear: 0  // 总磨损（已包含手续费）
         };
         
         existing.buyQuote += tokenData["今日买入总额"];
         existing.sellQuote += tokenData["今日卖出总额"];
+        existing.totalWear += tokenData["磨损"]; // 直接累加每天计算好的磨损
         overviewMap.set(token, existing);
       }
     }
@@ -597,8 +677,11 @@
     // 转换为显示格式
     const tokens = [];
     for (const [, v] of overviewMap) {
-      // 总览页面：盈利 = 卖出总额 - 买入总额 (正数为盈利，负数为亏损)
-      const profit = v.buyQuote === 0 ? 0 : v.sellQuote - v.buyQuote;
+      // 总览页面：直接使用累加的磨损作为盈利（磨损为负表示盈利）
+      const profit = -v.totalWear; // 磨损为正数表示亏损，所以盈利是负磨损
+      
+      console.log(`${v.token} 总览数据汇总: 买入=${v.buyQuote.toFixed(4)}, 卖出=${v.sellQuote.toFixed(4)}, 总磨损=${v.totalWear.toFixed(4)}, 盈利=${profit.toFixed(4)}`);
+      
       tokens.push({
         "代币": v.token,
         "今日买入总额": round(v.buyQuote, 8),
@@ -668,9 +751,19 @@
       const lastDate = dates[0]; // 最晚日期
       timeRangeStr = `${firstDate} 到 ${lastDate} 总览`;
     } else {
-      const targetDate = new Date(state.currentViewDate + 'T08:00:00');
-      const nextDay = new Date(targetDate.getTime() + 24 * 60 * 60 * 1000);
-      timeRangeStr = `${targetDate.toLocaleDateString()} 08:00 - ${nextDay.toLocaleDateString()} 08:00`;
+      // 显示按UTC+0自然日统计的时间范围
+      const dateStr = state.currentViewDate; // 格式为 "2025-09-11"
+      const utcStartDate = new Date(dateStr + 'T00:00:00Z');
+      const utcEndDate = new Date(dateStr + 'T23:59:59Z');
+      
+      // 转换为本地时间显示（UTC+8）
+      const localStart = new Date(utcStartDate.getTime() + 8 * 60 * 60 * 1000);
+      const localEnd = new Date(utcEndDate.getTime() + 8 * 60 * 60 * 1000);
+      
+      const startStr = localStart.toLocaleString('zh-CN', {hour12: false});
+      const endStr = localEnd.toLocaleString('zh-CN', {hour12: false});
+      
+      timeRangeStr = `${startStr} - ${endStr} (UTC+0: ${dateStr} 00:00-23:59)`;
     }
     
     // Alpha积分信息
