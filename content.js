@@ -182,11 +182,18 @@
     return Array.isArray(candidates) ? candidates : [];
   }
   
-  // 合并记录（去重按 orderId + updateTime）
+  // 合并API记录（只对有真实orderId的API数据去重）
   function mergeOrders(arr, src = "api") {
+    if (src !== "api") {
+      console.log(`错误：mergeOrders只应用于API数据，收到src=${src}`);
+      return;
+    }
+    
     const key = (o) => `${o.orderId || o.id || ""}_${o.updateTime || o.time || o.transactTime || ""}`;
-    const map = new Map(state.rawOrders.map(o => [key(o), o]));
-    console.log(`合并前：已有${state.rawOrders.length}条记录，新增${arr.length}条记录`);
+    const map = new Map(state.rawOrders.filter(o => o._src === "api").map(o => [key(o), o]));
+    const nonApiOrders = state.rawOrders.filter(o => o._src !== "api");
+    
+    console.log(`API数据合并前：已有${map.size}条API记录，${nonApiOrders.length}条非API记录，新增${arr.length}条API记录`);
     
     let addedCount = 0;
     let duplicateCount = 0;
@@ -194,7 +201,7 @@
     for (const o of arr) {
       const orderKey = key(o);
       if (map.has(orderKey)) {
-        console.log(`发现重复记录: ${o.symbol} ${o.side} ${o.updateTime}`);
+        console.log(`发现重复API记录: ${o.symbol} ${o.side} ${o.updateTime}`);
         duplicateCount++;
       } else {
         addedCount++;
@@ -202,8 +209,9 @@
       map.set(orderKey, { ...o, _src: src });
     }
     
-    state.rawOrders = [...map.values()];
-    console.log(`合并后：总计${state.rawOrders.length}条记录，新增${addedCount}条，重复${duplicateCount}条`);
+    // 重新组合所有数据：去重后的API数据 + 非API数据
+    state.rawOrders = [...nonApiOrders, ...map.values()];
+    console.log(`API数据合并后：总计${state.rawOrders.length}条记录，API新增${addedCount}条，重复${duplicateCount}条`);
   }
   
 
@@ -213,9 +221,6 @@
     state.collecting = true;
     state.rawOrders = [];
     state.collectedPages.clear();
-  
-    // 先尝试当前页 DOM 解析一次（以便页面尚未触发接口也能拿到）
-    scrapeDomIntoState();
   
     // 自动翻页：直到没有"下一页"
     const maxPages = 1000; // 保险
@@ -261,12 +266,18 @@
   
     const arr = [];
     console.log(`开始解析表格，共${trows.length}行，表头${ths.length}列`);
+    console.log(`列索引映射:`, idx);
+    console.log(`表头内容:`, ths);
     for (let i = 0; i < trows.length; i++) {
       const tr = trows[i];
       const tds = [...tr.querySelectorAll("td")];
-      if (!tds.length || tds.length < ths.length) {
-        console.log(`第${i+1}行：跳过展开行或无效行，td数量=${tds.length}`);
-        continue; // 跳过展开行
+      if (!tds.length) {
+        console.log(`第${i+1}行：跳过空行，td数量=0`);
+        continue; // 跳过空行
+      }
+      if (tds.length < ths.length) {
+        console.log(`第${i+1}行：跳过不完整行，td数量=${tds.length} < 表头数量${ths.length}`);
+        continue; // 跳过展开行或不完整行  
       }
       const get = (i) => (i >= 0 ? tds[i].innerText.trim() : "");
       const timeStr = get(idx.time);            // 2025-08-14 21:40:37
@@ -283,16 +294,30 @@
       // 检查成交额不为0（不过滤已取消订单）
       const amountUSDT = parseNumber(amountStr);
       if (amountUSDT === 0) {
-        console.log(`跳过0成交额订单: 时间=${timeStr}, 代币=${symbolStr}, 成交额=${amountStr}`);
+        console.log(`WARNING: 跳过0成交额订单: 时间=${timeStr}, 代币=${symbolStr}, 原始成交额='${amountStr}', 解析结果=${amountUSDT}`);
         continue;
       }
   
       // 处理方向列的文本或颜色样式
-      const side = /买入|buy|绿色/i.test(sideStr) || tr.querySelector('td[style*="color"] span')?.textContent?.includes('买入') ? "BUY" : 
-                   /卖出|sell|红色/i.test(sideStr) || tr.querySelector('td[style*="color"] span')?.textContent?.includes('卖出') ? "SELL" : "";
+      let side = "";
+      if (/买入|buy/i.test(sideStr)) {
+        side = "BUY";
+      } else if (/卖出|sell/i.test(sideStr)) {
+        side = "SELL";  
+      } else {
+        // 尝试通过颜色或样式判断
+        const sideCell = tds[idx.side];
+        const hasGreen = sideCell && (sideCell.innerHTML.includes('#00C851') || sideCell.innerHTML.includes('green'));
+        const hasRed = sideCell && (sideCell.innerHTML.includes('#FF4444') || sideCell.innerHTML.includes('red'));
+        if (hasGreen) side = "BUY";
+        else if (hasRed) side = "SELL";
+      }
       
-      console.log(`行数据: 时间=${timeStr}, 代币=${symbolStr}, 方向=${sideStr}->${side}, 已成交=${filledStr}, 成交额=${amountStr}`);
-      if (!side) continue;
+      console.log(`第${i+1}行数据: 时间=${timeStr}, 代币=${symbolStr}, 方向=${sideStr}->${side}, 已成交=${filledStr}, 成交额=${amountStr}`);
+      if (!side) {
+        console.log(`WARNING: 无法识别交易方向，sideStr='${sideStr}', 行HTML:`, tr.outerHTML);
+        continue;
+      }
   
       const token = parseToken(symbolStr, filledStr);
       const filledQty = parseNumber(filledStr);
@@ -311,7 +336,11 @@
         cummulativeQuoteQty: amountUSDT
       });
     }
-    mergeOrders(arr, "dom");
+    // 直接添加DOM数据，不进行去重（因为没有可靠的唯一ID）
+    console.log(`DOM解析：新增${arr.length}条记录，直接加入数据集`);
+    for (const o of arr) {
+      state.rawOrders.push({ ...o, _src: "dom" });
+    }
   }
   
   function parseToken(symbolCell, filledCell) {
@@ -751,19 +780,15 @@
       const lastDate = dates[0]; // 最晚日期
       timeRangeStr = `${firstDate} 到 ${lastDate} 总览`;
     } else {
-      // 显示按UTC+0自然日统计的时间范围
+      // 显示实际的统计时间范围：当日8:00到次日8:00
       const dateStr = state.currentViewDate; // 格式为 "2025-09-11"
-      const utcStartDate = new Date(dateStr + 'T00:00:00Z');
-      const utcEndDate = new Date(dateStr + 'T23:59:59Z');
+      const startDate = new Date(dateStr + 'T08:00:00');
+      const endDate = new Date(startDate.getTime() + 24 * 60 * 60 * 1000 - 1000); // 次日07:59:59
       
-      // 转换为本地时间显示（UTC+8）
-      const localStart = new Date(utcStartDate.getTime() + 8 * 60 * 60 * 1000);
-      const localEnd = new Date(utcEndDate.getTime() + 8 * 60 * 60 * 1000);
+      const startStr = startDate.toLocaleString('zh-CN', {hour12: false});
+      const endStr = endDate.toLocaleString('zh-CN', {hour12: false});
       
-      const startStr = localStart.toLocaleString('zh-CN', {hour12: false});
-      const endStr = localEnd.toLocaleString('zh-CN', {hour12: false});
-      
-      timeRangeStr = `${startStr} - ${endStr} (UTC+0: ${dateStr} 00:00-23:59)`;
+      timeRangeStr = `${startStr} - ${endStr}`;
     }
     
     // Alpha积分信息
