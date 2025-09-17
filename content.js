@@ -461,39 +461,51 @@
     return results;
   }
   
-  // 根据时间确定交易日期（按自然日00:00-23:59统计）
+  // 根据时间确定交易日期（按本地时间 08:00 - 次日 08:00 统计）
   function getTradeDate(timeStr) {
     if (!timeStr) return null;
     
-    // 解析时间字符串，格式通常为 "2025-09-14 21:00:00"
-    // 币安页面显示的是本地时间（UTC+8），我们直接按本地日期统计
+    // 解析时间字符串，格式通常为 "YYYY-MM-DD HH:mm:ss"
+    // 币安页面显示为本地时间（通常为 UTC+8）。
     const timeMatch = timeStr.match(/(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/);
     if (timeMatch) {
-      const [, year, month, day] = timeMatch;
-      const dateStr = `${year}-${month}-${day}`;
-      
-      console.log(`时间转换: ${timeStr} -> 交易日期: ${dateStr}`);
-      return dateStr;
+      const [, year, month, day, hh, mm, ss] = timeMatch;
+      const dt = new Date(`${year}-${month}-${day}T${hh}:${mm}:${ss}`);
+      if (!isNaN(dt.getTime())) {
+        // 统计日从 08:00 开始：若时间在 00:00-07:59，则归入前一天
+        if (dt.getHours() < 8) dt.setDate(dt.getDate() - 1);
+        const dateStr = dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0');
+        console.log(`时间转换(8点边界): ${timeStr} -> 交易日期: ${dateStr}`);
+        return dateStr;
+      }
     }
     
     // 回退逻辑：从时间字符串中提取日期部分
     if (timeStr.includes(' ')) {
       const datePart = timeStr.split(' ')[0];
       if (datePart.match(/\d{4}-\d{2}-\d{2}/)) {
-        console.log(`时间转换(回退): ${timeStr} -> 交易日期: ${datePart}`);
+        // 搭配具体时间再做 8 点边界修正
+        const tentative = new Date(timeStr);
+        if (!isNaN(tentative.getTime())) {
+          if (tentative.getHours() < 8) tentative.setDate(tentative.getDate() - 1);
+          const dateStr = tentative.getFullYear() + '-' + String(tentative.getMonth() + 1).padStart(2, '0') + '-' + String(tentative.getDate()).padStart(2, '0');
+          console.log(`时间转换(回退+8点边界): ${timeStr} -> 交易日期: ${dateStr}`);
+          return dateStr;
+        }
+        console.log(`时间转换(回退-未修正): ${timeStr} -> 交易日期: ${datePart}`);
         return datePart;
       }
     }
     
-    // 最后的回退：使用Date对象但按本地时区处理
+    // 最后的回退：使用 Date 对象并按本地时区处理，同时应用 8 点边界
     const time = new Date(timeStr);
     if (isNaN(time.getTime())) return null;
     
-    // 获取本地日期（不转换时区）
+    if (time.getHours() < 8) time.setDate(time.getDate() - 1);
     const localDateStr = time.getFullYear() + '-' + 
                          String(time.getMonth() + 1).padStart(2, '0') + '-' + 
                          String(time.getDate()).padStart(2, '0');
-    console.log(`时间转换(最终回退): ${timeStr} -> 本地日期: ${localDateStr}`);
+    console.log(`时间转换(最终回退+8点边界): ${timeStr} -> 本地日期: ${localDateStr}`);
     
     return localDateStr;
   }
